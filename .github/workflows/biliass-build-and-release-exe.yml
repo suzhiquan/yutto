@@ -1,0 +1,358 @@
+name: Build and Release (biliass)
+
+on:
+  push:
+    tags:
+      - "biliass*" # Push events to matching biliass*, i.e. biliass@1.0.0
+    branches:
+      - main
+    paths:
+      - "packages/biliass/**"
+      - ".github/**"
+  pull_request:
+    paths:
+      - "packages/biliass/**"
+      - ".github/**"
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            target: x86_64
+          - runner: ubuntu-latest
+            target: x86
+          - runner: ubuntu-latest
+            target: aarch64
+          - runner: ubuntu-latest
+            target: armv7
+          - runner: ubuntu-latest
+            target: s390x
+          - runner: ubuntu-latest
+            target: ppc64le
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.x
+          allow-prereleases: true
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --interpreter '3.14 3.14t'
+          sccache: "true"
+          manylinux: auto
+          working-directory: packages/biliass
+      - name: Upload wheels
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheels-linux-${{ matrix.platform.target }}
+          path: packages/biliass/dist
+
+  musllinux:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            target: x86_64
+          - runner: ubuntu-latest
+            target: x86
+          - runner: ubuntu-latest
+            target: aarch64
+          - runner: ubuntu-latest
+            target: armv7
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.x
+          allow-prereleases: true
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --interpreter '3.14 3.14t'
+          sccache: "true"
+          manylinux: musllinux_1_2
+          working-directory: packages/biliass
+      - name: Upload wheels
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheels-musllinux-${{ matrix.platform.target }}
+          path: packages/biliass/dist
+
+  windows:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: windows-latest
+            target: x64
+          - runner: windows-latest
+            target: x86
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          architecture: ${{ matrix.platform.target }}
+          allow-prereleases: true
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist
+          sccache: "true"
+          working-directory: packages/biliass
+      - name: Upload wheels
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheels-windows-${{ matrix.platform.target }}
+          path: packages/biliass/dist
+
+  # Python 3.13 standard and free-threaded versions cannot be
+  # available at the same time on Windows machines, so we
+  # split it into two jobs.
+  # https://github.com/Quansight-Labs/setup-python/issues/5
+  windows-free-threaded:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: windows-latest
+            target: x64
+          - runner: windows-latest
+            target: x86
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14t"
+          architecture: ${{ matrix.platform.target }}
+          allow-prereleases: true
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist
+          sccache: "true"
+          working-directory: packages/biliass
+      - name: Upload wheels
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheels-windows-free-threaded-${{ matrix.python-versions }}-${{ matrix.platform.target }}
+          path: packages/biliass/dist
+
+  # 新增：构建Windows独立可执行文件
+  windows-exe:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: windows-latest
+            target: x64
+          - runner: windows-latest
+            target: x86
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          architecture: ${{ matrix.platform.target }}
+          allow-prereleases: true
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}-pc-windows-msvc
+      - name: Build and install biliass
+        shell: bash
+        run: |
+          cd packages/biliass
+          # 首先构建并安装biliass包
+          pip install maturin
+          maturin develop --release --target ${{ matrix.platform.target }}
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+      - name: Create PyInstaller spec file
+        shell: bash
+        run: |
+          cd packages/biliass
+          cat > biliass.spec << 'EOF'
+          # -*- mode: python ; coding: utf-8 -*-
+          
+          block_cipher = None
+          
+          a = Analysis(
+              ['src/biliass/__main__.py'],
+              pathex=[],
+              binaries=[],
+              datas=[],
+              hiddenimports=['biliass', 'biliass._core'],
+              hookspath=[],
+              hooksconfig={},
+              runtime_hooks=[],
+              excludes=[],
+              win_no_prefer_redirects=False,
+              win_private_assemblies=False,
+              cipher=block_cipher,
+              noarchive=False,
+          )
+          
+          pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+          
+          exe = EXE(
+              pyz,
+              a.scripts,
+              a.binaries,
+              a.zipfiles,
+              a.datas,
+              [],
+              name='biliass',
+              debug=False,
+              bootloader_ignore_signals=False,
+              strip=False,
+              upx=True,
+              upx_exclude=[],
+              runtime_tmpdir=None,
+              console=True,
+              disable_windowed_traceback=False,
+              argv_emulation=False,
+              target_arch=None,
+              codesign_identity=None,
+              entitlements_file=None,
+          )
+          EOF
+      - name: Build executable with PyInstaller
+        shell: bash
+        run: |
+          cd packages/biliass
+          pyinstaller biliass.spec --clean
+          mkdir -p dist
+          cp dist/biliass.exe dist/ 2>/dev/null || cp dist/biliass dist/
+      - name: Upload executables
+        uses: actions/upload-artifact@v5
+        with:
+          name: exe-windows-${{ matrix.platform.target }}
+          path: packages/biliass/dist/biliass*
+
+  macos:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: macos-15-intel
+            target: x86_64
+          - runner: macos-15
+            target: aarch64
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.x
+          allow-prereleases: true
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --interpreter '3.14 3.14t'
+          sccache: "true"
+          working-directory: packages/biliass
+      - name: Upload wheels
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheels-macos-${{ matrix.platform.target }}
+          path: packages/biliass/dist
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+          working-directory: packages/biliass
+      - name: Upload sdist
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheels-sdist
+          path: packages/biliass/dist
+
+  publish-pypi:
+    runs-on: ubuntu-latest
+    name: Publish to PyPI
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    needs:
+      - linux
+      - musllinux
+      - windows
+      - windows-free-threaded
+      - macos
+      - sdist
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Retrieve release distributions
+        uses: actions/download-artifact@v6
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Publish release distributions to PyPI
+        run: uv publish -v
+
+  publish-release:
+    runs-on: ubuntu-latest
+    name: Publish to GitHub
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    needs:
+      - linux
+      - musllinux
+      - windows
+      - windows-free-threaded
+      - windows-exe
+      - macos
+      - sdist
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist/
+      - name: Download executables
+        uses: actions/download-artifact@v6
+        with:
+          pattern: exe-windows-*
+          merge-multiple: true
+          path: exe/
+      - name: Get tag name
+        run: echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+      - name: Publish to GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            dist/*
+            exe/*
+          tag_name: ${{ env.RELEASE_VERSION }}
